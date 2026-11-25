@@ -104,12 +104,16 @@ func loadConfig() config {
 	cfgOnce.Do(func() {
 		b, err := os.ReadFile(configPath())
 		if err != nil {
+			if !os.IsNotExist(err) {
+				slog.Warn("rook: config unreadable", "path", configPath(), "err", err)
+			}
 			return
 		}
 		if err := json.Unmarshal(b, &cfg); err != nil {
 			slog.Warn("rook: config unreadable", "path", configPath(), "err", err)
 		}
 		cfg.Bridges = slices.DeleteFunc(cfg.Bridges, func(s string) bool { return strings.TrimSpace(s) == "" })
+		slog.Info("rook: bridges", "path", configPath(), "bridges", len(cfg.Bridges))
 	})
 	return cfg
 }

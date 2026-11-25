@@ -17,7 +17,10 @@ import (
 // (custom_screens.go) in a file of its own, so a merge from upstream never touches it; offered only on
 // a device with bridges listed in rook.json (feature/rook).
 
-func init() {
+// Registered from a package variable, not init: display.go's init builds the display, and with it
+// Idle screen's choices, and a file's init runs in file-name order, after display.go's. Every package
+// variable is set before any init runs.
+var _ = func() bool {
 	registerScreen(customScreen{
 		id:      "rook",
 		label:   "Rook",
@@ -28,7 +31,8 @@ func init() {
 		draw:    drawRook,
 		key:     rookKey,
 	})
-}
+	return true
+}()
 
 // The Rook screen's own colors: the status lights. The rest are the theme's.
 var (

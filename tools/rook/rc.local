@@ -1,0 +1,6 @@
+#!/bin/sh
+# Method-Platform fork: run the Rook build of echod (/data/rook/echod) in place of the release one.
+# Remove this file (or /data/rook/echod) and reboot to go back to the stock daemon.
+[ -x /data/rook/echod ] || exit 0
+mount --bind /data/rook/echod /usr/local/bin/techo5 && killall techo5
+echo "rook echod bound $(date)"
