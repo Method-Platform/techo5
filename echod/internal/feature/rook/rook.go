@@ -35,8 +35,37 @@ type Session struct {
 	Status      string  `json:"status"` // busy, idle or waiting
 	WaitingFor  *string `json:"waitingFor"`
 	Title       *string `json:"title"`
+	Kind        string  `json:"kind"`
 	StatusSince int64   `json:"statusSince"` // ms since the epoch
+	StartedAt   int64   `json:"startedAt"`
 	Machine     string  `json:"-"`
+}
+
+// Label is what a session is called on the screen: its own title, else its name, else its project.
+func (s Session) Label() string {
+	if s.Title != nil && strings.TrimSpace(*s.Title) != "" {
+		return *s.Title
+	}
+	if s.Name != "" {
+		return s.Name
+	}
+	return s.Project
+}
+
+// Codex is the Codex subscription window, as of the last Codex session on the machine that reported it.
+type Codex struct {
+	Primary *struct {
+		UsedPercent int `json:"usedPercent"`
+	} `json:"primary"`
+	ObservedAt int64  `json:"observedAt"`
+	Authority  bool   `json:"authority"`
+	Machine    string `json:"machine"`
+}
+
+// CI is the release branches' CI across the repos a bridge watches.
+type CI struct {
+	Running int `json:"runningCount"`
+	Broken  int `json:"brokenCount"`
 }
 
 // Window is one usage window: the five-hour one or the week.
@@ -64,6 +93,8 @@ type View struct {
 	Sessions   []Session   // those needing someone first, then working, then idle; oldest first in each
 	Usage      *Usage      // the first bridge's that reported one
 	Production *Production // the bridge that polls it, if any does
+	Codex      *Codex      // the authority's, else the freshest
+	CI         *CI         // the bridge that watches it, if any does
 	Bridges    int         // configured
 	Connected  int         // with a live stream now
 }
@@ -129,6 +160,8 @@ type bridge struct {
 	sessions   []Session
 	usage      *Usage
 	production *Production
+	codex      *Codex
+	ci         *CI
 }
 
 var (
@@ -271,12 +304,15 @@ func apply(b *bridge, event string, data []byte) bool {
 			Sessions   []Session   `json:"sessions"`
 			Usage      *Usage      `json:"usage"`
 			Production *Production `json:"production"`
+			Codex      *Codex      `json:"codex"`
+			CI         *CI         `json:"ci"`
 		}
 		if json.Unmarshal(data, &s) != nil {
 			return false
 		}
 		mu.Lock()
 		b.machine, b.sessions, b.usage, b.production = s.Machine, tag(s.Sessions, s.Machine), s.Usage, s.Production
+		b.codex, b.ci = s.Codex, s.CI
 		mu.Unlock()
 		return true
 	case "sessions":
@@ -309,6 +345,24 @@ func apply(b *bridge, event string, data []byte) bool {
 		b.production = &p
 		mu.Unlock()
 		return true
+	case "codex":
+		var c Codex
+		if json.Unmarshal(data, &c) != nil {
+			return false
+		}
+		mu.Lock()
+		b.codex = &c
+		mu.Unlock()
+		return true
+	case "ci":
+		var c CI
+		if json.Unmarshal(data, &c) != nil {
+			return false
+		}
+		mu.Lock()
+		b.ci = &c
+		mu.Unlock()
+		return true
 	}
 	return false
 }
@@ -320,7 +374,7 @@ func tag(ss []Session, machine string) []Session {
 	return ss
 }
 
-var rank = map[string]int{"waiting": 0, "busy": 1, "idle": 2}
+var rank = map[string]int{"waiting": 0, "busy": 1, "shell": 2, "idle": 3}
 
 // Snapshot is what every bridge last said, merged.
 func Snapshot() View {
@@ -344,6 +398,15 @@ func Snapshot() View {
 		if v.Production == nil && b.production != nil && b.production.Status != "" {
 			v.Production = b.production
 		}
+		if c := b.codex; c != nil && c.Primary != nil {
+			if v.Codex == nil || (c.Authority && !v.Codex.Authority) ||
+				(c.Authority == v.Codex.Authority && c.ObservedAt > v.Codex.ObservedAt) {
+				v.Codex = c
+			}
+		}
+		if v.CI == nil && b.ci != nil {
+			v.CI = b.ci
+		}
 	}
 	sortSessions(v.Sessions)
 	return v
@@ -353,11 +416,11 @@ func sortSessions(ss []Session) {
 	slices.SortStableFunc(ss, func(a, b Session) int {
 		ra, ok := rank[a.Status]
 		if !ok {
-			ra = 3
+			ra = 4
 		}
 		rb, ok := rank[b.Status]
 		if !ok {
-			rb = 3
+			rb = 4
 		}
 		if ra != rb {
 			return ra - rb

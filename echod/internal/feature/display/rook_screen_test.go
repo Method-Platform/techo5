@@ -16,14 +16,21 @@ import (
 func rookSample(now time.Time) rook.View {
 	ms := func(d time.Duration) int64 { return now.Add(-d).UnixMilli() }
 	asks := "approve Bash"
+	title := "Echo Show 5 Rook screen on TECHO5"
 	return rook.View{
-		Bridges: 2, Connected: 2,
+		Bridges: 3, Connected: 2,
 		Sessions: []rook.Session{
-			{ID: "a", Name: "mac-mini-flutter-dev", Status: "waiting", WaitingFor: &asks, StatusSince: ms(3 * time.Minute), Machine: "mac-mini"},
-			{ID: "b", Name: "mac-mini-orchestrator", Status: "busy", StatusSince: ms(12 * time.Minute), Machine: "mac-mini"},
-			{ID: "c", Name: "lead-automations-otto", Status: "busy", StatusSince: ms(40 * time.Second), Machine: "otto-imac"},
-			{ID: "d", Name: "mp-frontend-otto", Status: "idle", StatusSince: ms(5 * time.Hour), Machine: "otto-imac"},
+			{ID: "a", Name: "mac-mini-orchestrator", Title: &title, Status: "busy", StatusSince: ms(64 * time.Minute), Machine: "mac-mini"},
+			{ID: "b", Name: "mac-mini-flutter-dev", Status: "waiting", WaitingFor: &asks, StatusSince: ms(3 * time.Minute), Machine: "mac-mini"},
+			{ID: "c", Name: "lead-automations-otto", Status: "busy", StatusSince: ms(40 * time.Second), Machine: "otto-iMac"},
+			{ID: "d", Name: "harold-shell", Status: "shell", StatusSince: ms(6 * time.Hour), Machine: "harold-omarchy"},
+			{ID: "e", Name: "mp-frontend-otto", Status: "idle", StatusSince: ms(5 * 24 * time.Hour), Machine: "otto-iMac"},
+			{ID: "f", Name: "accounting-otto", Status: "idle", StatusSince: ms(6 * 24 * time.Hour), Machine: "otto-iMac"},
 		},
+		Codex: &rook.Codex{Primary: &struct {
+			UsedPercent int `json:"usedPercent"`
+		}{83}},
+		CI: &rook.CI{},
 		Usage: &rook.Usage{
 			FiveHour: &rook.Window{UsedPercent: 63, ResetsAt: now.Add(95 * time.Minute).UnixMilli()},
 			Weekly:   &rook.Window{UsedPercent: 92, ResetsAt: now.Add(50 * time.Hour).UnixMilli()},
@@ -60,7 +67,7 @@ func TestRookScreenDraws(t *testing.T) {
 				sessions = append(sessions, z.id)
 			}
 		}
-		if !slices.Equal(sessions, []string{"a", "b", "c", "d"}) {
+		if !slices.Equal(sessions, []string{"a", "b", "c", "d", "e"}) {
 			t.Fatalf("%s: session zones %v", size.name, sessions)
 		}
 		if rookKey(s) == "" || customFrameKey(s, false, false) == "" {
@@ -69,12 +76,23 @@ func TestRookScreenDraws(t *testing.T) {
 
 		empty := scene{now: at, phase: "idle", custom: customView{name: "rook", data: rook.View{Bridges: 2}}}
 		goldenDraw(t, "rook-connecting-"+size.name, size.w, size.h, empty)
+
+		waiting := rookSample(at)
+		waiting.Sessions[0], waiting.Sessions[1] = waiting.Sessions[1], waiting.Sessions[0]
+		goldenDraw(t, "rook-waiting-"+size.name, size.w, size.h, scene{now: at, phase: "idle", custom: customView{name: "rook", data: waiting}})
+
+		down := rookSample(at)
+		down.Production = &rook.Production{Reachable: true, Status: "degraded", Alerts: []string{"redis down"}}
+		goldenDraw(t, "rook-incident-"+size.name, size.w, size.h, scene{now: at, phase: "idle", custom: customView{name: "rook", data: down}})
 	}
 	if got, _ := rookSummary(rookSample(at)); got != "1 need you · 2 working" {
 		t.Fatalf("summary %q", got)
 	}
 	if rookAgo(at, at.Add(-90*time.Minute).UnixMilli()) != "1h" || rookAgo(at, at.Add(-20*time.Second).UnixMilli()) != "now" {
 		t.Fatal("rookAgo")
+	}
+	if rookClock(at, at.Add(-64*time.Minute).UnixMilli()) != "1:04" {
+		t.Fatal("rookClock")
 	}
 	_ = image.Point{}
 }

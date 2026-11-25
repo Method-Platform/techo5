@@ -6,16 +6,27 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/image/font"
+	"golang.org/x/image/vector"
 
 	"github.com/HuskerMinion/techo5/echod/internal/feature/rook"
+	"github.com/HuskerMinion/techo5/echod/internal/lib/fonts"
 )
 
-// The Rook screen (Method-Platform fork): the Claude Code sessions the Rook bridges report, which need
-// someone and which are working, beside the usage windows and production's status. A custom screen
-// (custom_screens.go) in a file of its own, so a merge from upstream never touches it; offered only on
-// a device with bridges listed in rook.json (feature/rook).
+// The Rook screen (Method-Platform fork): the Claude Code sessions the Rook bridges report, drawn as
+// Rook Face's "Strip" for the Echo Show 5 (Method-Platform/android-status-monitor,
+// design/rook-show5.html): the session that matters most as a disc on the left, the next four as rows
+// beside it, and six facts under them. A custom screen (custom_screens.go) in a file of its own, so a
+// merge from upstream never touches it; offered only on a device with bridges listed in rook.json.
+//
+// It keeps its own look rather than the theme's: near-black ground, Inter and Go Mono, and the status
+// colors Rook Face uses on every panel, so the Show reads the same as the Portals and the Spot.
 
 // Registered from a package variable, not init: display.go's init builds the display, and with it
 // Idle screen's choices, and a file's init runs in file-name order, after display.go's. Every package
@@ -34,17 +45,27 @@ var _ = func() bool {
 	return true
 }()
 
-// The Rook screen's own colors: the status lights. The rest are the theme's.
+// Rook Face's palette (design/rook-show5.html).
 var (
-	rookWaiting = color.RGBA{0xe8, 0x5d, 0x4a, 0xff}
-	rookBusy    = color.RGBA{0x4f, 0xb8, 0x7a, 0xff}
+	rkGround  = color.RGBA{0x07, 0x08, 0x0b, 0xff}
+	rkRow     = color.RGBA{0x0e, 0x10, 0x14, 0xff}
+	rkRowWait = color.RGBA{0x1b, 0x14, 0x08, 0xff}
+	rkRule    = color.RGBA{0x1a, 0x1d, 0x23, 0xff}
+	rkInk     = color.RGBA{0xe9, 0xe5, 0xde, 0xff}
+	rkInk2    = color.RGBA{0xa6, 0xa2, 0x9b, 0xff}
+	rkInk3    = color.RGBA{0x7c, 0x78, 0x71, 0xff}
+	rkIdle    = color.RGBA{0x3e, 0x43, 0x4b, 0xff}
+	rkGreen   = color.RGBA{0x4f, 0xb8, 0x94, 0xff}
+	rkAmber   = color.RGBA{0xf0, 0xa4, 0x2c, 0xff}
+	rkRed     = color.RGBA{0xe0, 0x5a, 0x47, 0xff}
+	rkRedInk  = color.RGBA{0xf2, 0xb8, 0xae, 0xff}
+	rkClay    = color.RGBA{0xd9, 0x77, 0x57, 0xff}
+	rkBlue    = color.RGBA{0x4a, 0x6f, 0xa5, 0xff}
+	rkViolet  = color.RGBA{0x9b, 0x8a, 0xc4, 0xff}
 )
 
-const (
-	rookRowH   = 62  // a session's row
-	rookSideW  = 300 // the column at the right: usage and production
-	rookMaxRow = 6   // rows drawn before "and N more"
-)
+// rookRows is how many sessions are rows beside the disc.
+const rookRows = 4
 
 func rookView(s scene) rook.View {
 	v, _ := s.custom.data.(rook.View)
@@ -52,13 +73,13 @@ func rookView(s scene) rook.View {
 }
 
 // rookKey is what a frame shows, for frames that would look the same. The times in it go by the
-// minute, as the frame key's own clock does.
+// minute, as the frame key's own clock does, and the comet turns with the minute.
 func rookKey(s scene) string {
 	v := rookView(s)
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d/%d|", v.Connected, v.Bridges)
+	fmt.Fprintf(&b, "%d/%d|%d|", v.Connected, v.Bridges, s.now.Unix()/60)
 	for _, x := range v.Sessions {
-		fmt.Fprintf(&b, "%s:%s:%d|", x.ID, x.Status, x.StatusSince/60000)
+		fmt.Fprintf(&b, "%s/%s:%s:%s:%d|", x.Machine, x.ID, x.Status, x.Label(), x.StatusSince/60000)
 	}
 	if u := v.Usage; u != nil {
 		if u.FiveHour != nil {
@@ -68,13 +89,19 @@ func rookKey(s scene) string {
 			fmt.Fprintf(&b, "wk%d|", u.Weekly.UsedPercent)
 		}
 	}
+	if c := v.Codex; c != nil && c.Primary != nil {
+		fmt.Fprintf(&b, "cx%d|", c.Primary.UsedPercent)
+	}
+	if c := v.CI; c != nil {
+		fmt.Fprintf(&b, "ci%d/%d|", c.Broken, c.Running)
+	}
 	if p := v.Production; p != nil {
-		fmt.Fprintf(&b, "p%s%d", p.Status, len(p.Alerts))
+		fmt.Fprintf(&b, "p%v%s%s", p.Reachable, p.Status, strings.Join(p.Alerts, ","))
 	}
 	return b.String()
 }
 
-// rookSummary is the top bar's line, and whether it is urgent.
+// rookSummary is a line for what the screen says at a glance, and whether it is urgent.
 func rookSummary(v rook.View) (string, bool) {
 	switch {
 	case v.Bridges > 0 && v.Connected == 0:
@@ -89,7 +116,7 @@ func rookSummary(v rook.View) (string, bool) {
 	return "All idle", false
 }
 
-// rookAgo is how long a session has been as it is: "now", "12m", "3h", "2d".
+// rookAgo is how long ago sinceMs was, coarsely: "now", "12m", "3h", "2d".
 func rookAgo(now time.Time, sinceMs int64) string {
 	if sinceMs <= 0 {
 		return ""
@@ -106,154 +133,392 @@ func rookAgo(now time.Time, sinceMs int64) string {
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
-func rookStatusWord(x rook.Session) string {
+// rookClock is how long a session has been as it is: "0:42", "3:05", then coarse past ten hours.
+func rookClock(now time.Time, sinceMs int64) string {
+	if sinceMs <= 0 {
+		return ""
+	}
+	d := max(now.Sub(time.UnixMilli(sinceMs)), 0)
+	if d >= 10*time.Hour {
+		return rookAgo(now, sinceMs)
+	}
+	return fmt.Sprintf("%d:%02d", int(d.Hours()), int(d.Minutes())%60)
+}
+
+// rookTone is a session's word and color.
+func rookTone(x rook.Session) (string, color.RGBA) {
 	switch x.Status {
 	case "waiting":
-		if x.WaitingFor != nil && *x.WaitingFor != "" {
-			return *x.WaitingFor
-		}
-		return "needs you"
+		return "NEEDS YOU", rkAmber
 	case "busy":
-		return "working"
+		return "WORKING", rkGreen
+	case "shell":
+		return "SHELL", rkBlue
 	}
-	return x.Status
+	return "IDLE", rkIdle
+}
+
+// rookIncident is production broken badly enough to take the disc: unreachable, or reporting itself
+// anything but OK. A standing alert on a production that says OK is the ledger's, not the disc's:
+// nothing here acknowledges it, and it would hold the screen red for days.
+func rookIncident(v rook.View) (headline, reason string, ok bool) {
+	p := v.Production
+	if p == nil {
+		return "", "", false
+	}
+	if !p.Reachable {
+		return "DOWN", "API unreachable", true
+	}
+	switch strings.ToLower(p.Status) {
+	case "", "ok", "healthy":
+		return "", "", false
+	}
+	reason = strings.ToLower(p.Status)
+	if len(p.Alerts) > 0 {
+		reason = p.Alerts[0]
+	}
+	return strings.ToUpper(p.Status), reason, true
+}
+
+// The faces, Inter throughout, cached by size.
+var (
+	rkFaceMu sync.Mutex
+	rkFaces  = map[string]font.Face{}
+)
+
+func rkFace(family string, bold bool, px float64) font.Face {
+	k := fmt.Sprintf("%s/%v/%.1f", family, bold, px)
+	rkFaceMu.Lock()
+	defer rkFaceMu.Unlock()
+	if f, ok := rkFaces[k]; ok {
+		return f
+	}
+	f, err := fonts.Face(family, bold, px)
+	if err != nil {
+		f, _ = fonts.Face(fonts.Go, bold, px)
+	}
+	rkFaces[k] = f
+	return f
+}
+
+// strip is a frame of the Strip: Rook Face's 788 by 394 dp layout, scaled to the panel and centered.
+type strip struct {
+	r      *renderer
+	k      float64 // pixels per dp
+	ox, oy float64 // where dp 0,0 is
+}
+
+func (p strip) x(dp float64) int      { return int(math.Round(p.ox + dp*p.k)) }
+func (p strip) y(dp float64) int      { return int(math.Round(p.oy + dp*p.k)) }
+func (p strip) fx(dp float64) float64 { return p.ox + dp*p.k }
+func (p strip) fy(dp float64) float64 { return p.oy + dp*p.k }
+func (p strip) px(dp float64) float64 { return dp * p.k }
+
+func (p strip) sans(bold bool, dp float64) font.Face { return rkFace("inter", bold, dp*p.k) }
+// mono is the design's IBM Plex Mono: Inter stands in, letter-spaced, since Go Mono's slab serifs
+// read heavy at these sizes.
+func (p strip) mono(bold bool, dp float64) font.Face { return rkFace("inter", bold, dp*p.k*1.06) }
+
+// spaced draws s with track dp between letters, as the design's letter-spaced labels; anchor is
+// -1 left, 0 centered, 1 right on x.
+func (p strip) spaced(face font.Face, s string, x, y, track float64, anchor int, c color.Color) {
+	t := p.px(track)
+	w := 0.0
+	for _, ch := range s {
+		w += float64(p.r.width(face, string(ch))) + t
+	}
+	w -= t
+	at := p.fx(x)
+	switch anchor {
+	case 0:
+		at -= w / 2
+	case 1:
+		at -= w
+	}
+	for _, ch := range s {
+		p.r.text(face, string(ch), int(math.Round(at)), p.y(y), c)
+		at += float64(p.r.width(face, string(ch))) + t
+	}
+}
+
+// line draws s at x (anchor as spaced), cut to room dp.
+func (p strip) line(face font.Face, s string, x, y, room float64, anchor int, c color.Color) {
+	s = p.r.fit(face, s, int(p.px(room)))
+	w := float64(p.r.width(face, s))
+	at := p.fx(x)
+	switch anchor {
+	case 0:
+		at -= w / 2
+	case 1:
+		at -= w
+	}
+	p.r.text(face, s, int(math.Round(at)), p.y(y), c)
+}
+
+// arc is a stroke along the circle at cx, cy, rad dp, w thick, from degree from to degree to
+// clockwise from the top, with round ends.
+func (p strip) arc(cx, cy, rad, w, from, to float64, c color.RGBA) {
+	X, Y, R, W := p.fx(cx), p.fy(cy), p.px(rad), p.px(w)
+	if to-from >= 360 {
+		p.r.arcBand(X, Y, R, W, 0, 360, c)
+		return
+	}
+	p.r.arcBand(X, Y, R, W, from, to, c)
+	for _, deg := range []float64{from, to} {
+		a := (deg - 90) * math.Pi / 180
+		p.dot(X+R*math.Cos(a), Y+R*math.Sin(a), W/2, c)
+	}
+}
+
+// dot is an antialiased disc at pixel x, y.
+func (p strip) dot(x, y, rad float64, c color.RGBA) {
+	box := image.Rect(int(x-rad)-1, int(y-rad)-1, int(x+rad)+2, int(y+rad)+2)
+	ox, oy := x-float64(box.Min.X), y-float64(box.Min.Y)
+	p.r.fillShape(box, c, func(z *vector.Rasterizer, _, _ float32) {
+		const n = 32
+		for i := 0; i <= n; i++ {
+			a := 2 * math.Pi * float64(i) / n
+			px, py := float32(ox+rad*math.Cos(a)), float32(oy+rad*math.Sin(a))
+			if i == 0 {
+				z.MoveTo(px, py)
+			} else {
+				z.LineTo(px, py)
+			}
+		}
+	})
+}
+
+// fade is c at opacity a over the ground: the design's translucent strokes, already mixed.
+func fade(c color.RGBA, a float64) color.RGBA {
+	m := func(f, g uint8) uint8 { return uint8(float64(g) + (float64(f)-float64(g))*a) }
+	return color.RGBA{m(c.R, rkGround.R), m(c.G, rkGround.G), m(c.B, rkGround.B), 0xff}
+}
+
+// glow floods the disc toward its rim in c, as Rook Face's radial gradient: clear in the middle,
+// strongest, edge, at the rim.
+func (p strip) glow(cx, cy, rad float64, c color.RGBA, edge float64) {
+	const bands, depth = 48, 0.5
+	step := rad * depth / bands
+	for i := 0; i < bands; i++ {
+		t := float64(i) / bands // 0 at the rim
+		a := edge * (1 - t) * (1 - t)
+		p.r.arcBand(p.fx(cx), p.fy(cy), p.px(rad-step*(float64(i)+0.5)), p.px(step)+1, 0, 360, fade(c, a))
+	}
+}
+
+// wrap breaks s into at most two lines of room dp in face, the second cut with an ellipsis.
+func (p strip) wrap(face font.Face, s string, room float64) []string {
+	w := int(p.px(room))
+	if p.r.width(face, s) <= w {
+		return []string{s}
+	}
+	words := strings.Fields(s)
+	first, i := "", 0
+	for ; i < len(words); i++ {
+		try := strings.TrimSpace(first + " " + words[i])
+		if p.r.width(face, try) > w {
+			break
+		}
+		first = try
+	}
+	if first == "" { // one long word, as a hyphenated name is: break it where it fits
+		n := 0
+		for n < len(s) {
+			_, size := utf8.DecodeRuneInString(s[n:])
+			if p.r.width(face, s[:n+size]) > w {
+				break
+			}
+			n += size
+		}
+		return []string{s[:n], p.r.fit(face, s[n:], w)}
+	}
+	return []string{first, p.r.fit(face, strings.Join(words[i:], " "), w)}
 }
 
 func drawRook(r *renderer, s scene) []customZone {
 	v := rookView(s)
-	summary, hot := rookSummary(v)
-	r.fillRect(image.Rect(0, 0, r.w, r.h), walnut)
-	zones := r.customBar(s, summary, hot, false)
-	fc := r.faces()
+	k := math.Min(float64(r.w)/788, float64(r.h)/394)
+	p := strip{r: r, k: k, ox: (float64(r.w) - 788*k) / 2, oy: (float64(r.h) - 394*k) / 2}
+	r.fillRect(image.Rect(0, 0, r.w, r.h), rkGround)
+	var zones []customZone
 
-	top := r.s(customBarH) + r.s(10)
-	in := r.s(customIn)
-	side := r.s(rookSideW)
-	listR := image.Rect(in, top, r.w-side-in*2, r.h-in)
-	sideR := image.Rect(r.w-side-in, top, r.w-in, r.h-in)
+	head, reason, incident := rookIncident(v)
+	var lead *rook.Session
+	rest := v.Sessions
+	if len(rest) > 0 && !incident {
+		lead, rest = &rest[0], rest[1:]
+	}
 
-	// The sessions, one row each.
-	rowH := r.s(rookRowH)
-	rows := v.Sessions
-	more := 0
-	if fit := listR.Dy() / rowH; len(rows) > fit && fit > 0 {
-		more = len(rows) - (fit - 1)
-		rows = rows[:fit-1]
-	}
-	if len(rows) > rookMaxRow {
-		more += len(rows) - rookMaxRow
-		rows = rows[:rookMaxRow]
-	}
-	if len(v.Sessions) == 0 {
-		msg := "No Claude Code sessions"
-		if v.Bridges > 0 && v.Connected == 0 {
-			msg = "Connecting to the bridges…"
-		}
-		r.text(fc.label, msg, listR.Min.X, listR.Min.Y+r.s(40), dim)
-	}
-	for i, x := range rows {
-		row := image.Rect(listR.Min.X, listR.Min.Y+i*rowH, listR.Max.X, listR.Min.Y+(i+1)*rowH-r.s(6))
-		ground, lamp := surface(1), dim
-		switch x.Status {
+	// The disc.
+	const cx, cy, rad = 196.0, 197.0, 162.0
+	switch {
+	case incident:
+		r.roundStroke(image.Rect(0, 0, r.w, r.h).Inset(int(p.px(2))), 0, p.px(3.5), rkRed)
+		p.glow(cx, cy, rad, rkRed, 0.30)
+		p.arc(cx, cy, rad, 8, 0, 360, rkRed)
+		p.spaced(p.mono(false, 10), "V3 PRODUCTION", cx, 163, 1.8, 0, rkRed)
+		p.line(p.sans(true, 34), head, cx, 203, 280, 0, rkRedInk)
+		p.line(p.sans(false, 14), reason, cx, 227, 260, 0, rkInk)
+	case lead != nil:
+		word, tone := rookTone(*lead)
+		p.arc(cx, cy, rad, 7, 0, 360, rkRule)
+		switch lead.Status {
 		case "waiting":
-			ground, lamp = shift(surface(2), 6), rookWaiting
+			p.glow(cx, cy, rad, rkAmber, 0.24)
+			p.arc(cx, cy, rad, 7, 0, 360, rkAmber)
 		case "busy":
-			lamp = rookBusy
-		}
-		rad := float64(r.s(14))
-		r.roundFill(row, rad, ground, ground)
-		if x.Status == "waiting" {
-			r.roundStroke(row, rad, r.sf(2), rookWaiting)
-		}
-		cy := row.Min.Y + row.Dy()/2
-		r.disc(row.Min.X+r.s(24), cy, r.s(8), lamp)
-
-		ago := rookAgo(s.now, x.StatusSince)
-		agoW := r.width(fc.value, ago)
-		r.text(fc.value, ago, row.Max.X-r.s(16)-agoW, cy+r.s(10), dim)
-
-		nameX := row.Min.X + r.s(46)
-		room := row.Max.X - r.s(32) - agoW - nameX
-		name := x.Name
-		if name == "" {
-			name = x.Project
-		}
-		r.text(fc.labelBold, r.fit(fc.labelBold, name, room), nameX, cy-r.s(2), cream)
-		sub := rookStatusWord(x)
-		if x.Machine != "" {
-			sub += " · " + x.Machine
-		}
-		subCol := dim
-		if x.Status == "waiting" {
-			subCol = rookWaiting
-		}
-		r.text(fc.sub, r.fit(fc.sub, sub, room), nameX, cy+r.s(22), subCol)
-		zones = append(zones, customZone{r: row, kind: "session", id: x.ID})
-	}
-	if more > 0 {
-		y := listR.Min.Y + len(rows)*rowH + r.s(30)
-		r.text(fc.sub, fmt.Sprintf("and %d more", more), listR.Min.X+r.s(46), y, dim)
-	}
-
-	// The side: usage windows, then production.
-	y := sideR.Min.Y
-	if u := v.Usage; u != nil {
-		y = rookMeter(r, sideR, y, "5-hour window", u.FiveHour, s.now)
-		y = rookMeter(r, sideR, y, "This week", u.Weekly, s.now)
-	}
-	if p := v.Production; p != nil {
-		y += r.s(10)
-		col, word := rookBusy, "Production OK"
-		switch {
-		case !p.Reachable:
-			col, word = rookWaiting, "Production unreachable"
-		case len(p.Alerts) > 0:
-			col, word = rookWaiting, fmt.Sprintf("Production: %d alert", len(p.Alerts))
-			if len(p.Alerts) > 1 {
-				word += "s"
+			// The comet: a bright head and a tail that thins and fades behind it, turning with the
+			// minute, so working reads as motion even in a still.
+			turn := float64((s.now.Unix()/60)%12) * 30
+			for _, seg := range []struct{ from, to, w, a float64 }{
+				{218, 242, 3.1, 0.14}, {242, 274, 4.3, 0.30}, {274, 314, 5.6, 0.55}, {314, 360, 7.0, 1},
+			} {
+				p.arc(cx, cy, rad, seg.w, seg.from+turn, seg.to+turn, fade(rkGreen, seg.a))
 			}
-		case p.Status != "" && p.Status != "ok" && p.Status != "healthy":
-			col, word = amber, "Production "+p.Status
+		case "shell":
+			p.arc(cx, cy, rad, 7, 0, 360, fade(rkBlue, 0.5))
 		}
-		r.disc(sideR.Min.X+r.s(8), y+r.s(18), r.s(7), col)
-		r.text(fc.label, r.fit(fc.label, word, sideR.Dx()-r.s(24)), sideR.Min.X+r.s(24), y+r.s(28), cream)
-		if p.Version != "" {
-			r.text(fc.sub, p.Version, sideR.Min.X+r.s(24), y+r.s(56), dim)
+		// The inner arc: the five-hour window used, as on the Spot's face.
+		if u := v.Usage; u != nil && u.FiveHour != nil && u.FiveHour.UsedPercent > 0 {
+			p.arc(cx, cy, 138.2, 3.5, 0, 360*math.Min(float64(u.FiveHour.UsedPercent)/100, 1), rkClay)
 		}
+		p.spaced(p.mono(false, 10), word, cx, 152, 1.8, 0, tone)
+		big := p.sans(true, 19)
+		lines := p.wrap(big, lead.Label(), 236)
+		top := 186.0
+		if len(lines) == 1 {
+			top = 197
+		}
+		for i, l := range lines {
+			p.line(big, l, cx, top+float64(i)*23, 236, 0, rkInk)
+		}
+		meta := lead.Machine
+		if c := rookClock(s.now, lead.StatusSince); c != "" {
+			meta += " · " + c
+		}
+		y := 240.0
+		if lead.Status == "waiting" && lead.WaitingFor != nil && *lead.WaitingFor != "" {
+			p.line(p.sans(false, 12.5), *lead.WaitingFor, cx, y, 220, 0, rkAmber)
+			y += 20
+		}
+		p.spaced(p.mono(false, 10.5), meta, cx, y, 0.9, 0, rkInk3)
+		zones = append(zones, customZone{r: image.Rect(p.x(cx-rad), p.y(cy-rad), p.x(cx+rad), p.y(cy+rad)), kind: "session", id: lead.ID})
+	default:
+		p.arc(cx, cy, rad, 7, 0, 360, rkRule)
+		word, sub := "NO SESSIONS", "nothing running"
+		if v.Bridges > 0 && v.Connected == 0 {
+			word, sub = "CONNECTING", "to the bridges"
+		}
+		p.spaced(p.mono(false, 10), word, cx, 190, 1.8, 0, rkInk3)
+		p.line(p.sans(false, 14), sub, cx, 214, 220, 0, rkInk2)
+	}
+
+	// The rule between the disc and the rest.
+	r.fillRect(image.Rect(p.x(392), p.y(26), p.x(392)+max(1, int(p.px(1.2))), p.y(368)), rkRule)
+
+	// The rows.
+	shown := rest
+	if len(shown) > rookRows {
+		shown = shown[:rookRows]
+	}
+	for i, x := range shown {
+		top := 24 + float64(i)*56
+		box := image.Rect(p.x(416), p.y(top), p.x(772), p.y(top+50))
+		ground := rkRow
+		if x.Status == "waiting" {
+			ground = rkRowWait
+		}
+		r.roundFill(box, p.px(8), ground, ground)
+		word, tone := rookTone(x)
+		p.dot(p.fx(432), p.fy(top+25), p.px(3.6), tone)
+		p.line(p.sans(true, 13), x.Label(), 446, top+22, 236, -1, rkInk)
+		sub := x.Machine
+		if x.Status == "waiting" && x.WaitingFor != nil && *x.WaitingFor != "" {
+			sub = *x.WaitingFor + " · " + x.Machine
+		}
+		small := p.mono(false, 9)
+		p.spaced(small, r.fit(small, sub, int(p.px(215))), 446, top+38, 0.6, -1, rkInk3)
+		p.spaced(p.mono(false, 8.5), word, 758, top+22, 1, 1, tone)
+		age := rookAgo(s.now, x.StatusSince)
+		if x.Status == "waiting" || x.Status == "busy" {
+			age = rookClock(s.now, x.StatusSince)
+		}
+		p.line(p.mono(false, 11), age, 758, top+38, 80, 1, rkInk2)
+		zones = append(zones, customZone{r: box, kind: "session", id: x.ID})
+	}
+
+	// The ledger: six facts, three across.
+	r.fillRect(image.Rect(p.x(416), p.y(258), p.x(772), p.y(258)+max(1, int(p.px(1.2)))), rkRule)
+	pct := func(w *rook.Window, c color.RGBA) (string, color.RGBA) {
+		if w == nil {
+			return "—", rkInk3
+		}
+		if w.UsedPercent >= 90 {
+			c = rkRed
+		}
+		return fmt.Sprintf("%d%%", w.UsedPercent), c
+	}
+	var five, week *rook.Window
+	if u := v.Usage; u != nil {
+		five, week = u.FiveHour, u.Weekly
+	}
+	type fact struct {
+		label, value string
+		c            color.RGBA
+	}
+	var facts [6]fact
+	facts[0].label, facts[1].label, facts[2].label = "SESSION", "WEEK", "CODEX"
+	facts[3].label, facts[4].label, facts[5].label = "PROD", "CI", "MACHINES"
+	facts[0].value, facts[0].c = pct(five, rkClay)
+	facts[1].value, facts[1].c = pct(week, rkBlue)
+	facts[2].value, facts[2].c = "—", rkInk3
+	if c := v.Codex; c != nil && c.Primary != nil {
+		facts[2].value, facts[2].c = pct(&rook.Window{UsedPercent: c.Primary.UsedPercent}, rkViolet)
+	}
+	facts[3].value, facts[3].c = "—", rkInk3
+	if pr := v.Production; pr != nil {
+		switch {
+		case incident:
+			facts[3].value, facts[3].c = head, rkRed
+		case len(pr.Alerts) == 1:
+			facts[3].value, facts[3].c = "1 ALERT", rkAmber
+		case len(pr.Alerts) > 1:
+			facts[3].value, facts[3].c = fmt.Sprintf("%d ALERTS", len(pr.Alerts)), rkAmber
+		default:
+			facts[3].value, facts[3].c = "OK", rkGreen
+		}
+	}
+	facts[4].value, facts[4].c = "—", rkInk3
+	if ci := v.CI; ci != nil {
+		switch {
+		case ci.Broken > 0:
+			facts[4].value, facts[4].c = fmt.Sprintf("%d RED", ci.Broken), rkRed
+		case ci.Running > 0:
+			facts[4].value, facts[4].c = fmt.Sprintf("%d RUN", ci.Running), rkBlue
+		default:
+			facts[4].value, facts[4].c = "OK", rkGreen
+		}
+	}
+	facts[5].value, facts[5].c = fmt.Sprintf("%d/%d", v.Connected, v.Bridges), rkGreen
+	switch {
+	case v.Connected == 0:
+		facts[5].c = rkRed
+	case v.Connected < v.Bridges:
+		facts[5].c = rkAmber
+	}
+	for i, f := range facts {
+		x := 416 + float64(i%3)*118.67
+		y := 280 + float64(i/3)*42
+		p.spaced(p.mono(false, 8.5), f.label, x, y, 1.2, -1, rkInk3)
+		size := 17.0
+		if utf8.RuneCountInString(f.value) > 6 {
+			size = 13
+		}
+		p.line(p.mono(true, size), f.value, x, y+18, 112, -1, f.c)
+	}
+
+	if more := len(rest) - len(shown); more > 0 {
+		p.spaced(p.mono(false, 8.5), fmt.Sprintf("+%d MORE", more), 772, 380, 1.3, 1, rkInk3)
 	}
 	return zones
-}
-
-// rookMeter draws one usage window as a labeled bar, returning where the next goes.
-func rookMeter(r *renderer, side image.Rectangle, y int, label string, w *rook.Window, now time.Time) int {
-	if w == nil {
-		return y
-	}
-	fc := r.faces()
-	pct := fmt.Sprintf("%d%%", w.UsedPercent)
-	r.text(fc.label, label, side.Min.X, y+r.s(26), cream)
-	r.text(fc.value, pct, side.Max.X-r.width(fc.value, pct), y+r.s(26), cream)
-	bar := image.Rect(side.Min.X, y+r.s(40), side.Max.X, y+r.s(56))
-	rad := float64(bar.Dy()) / 2
-	r.roundFill(bar, rad, surface(2), surface(2))
-	frac := min(max(float64(w.UsedPercent)/100, 0), 1)
-	if frac > 0 {
-		fill := bar
-		fill.Max.X = bar.Min.X + max(int(float64(bar.Dx())*frac), bar.Dy())
-		col := amber
-		if w.UsedPercent >= 90 {
-			col = rookWaiting
-		}
-		r.roundFill(fill, rad, col, col)
-	}
-	next := y + r.s(66)
-	if w.ResetsAt > 0 {
-		left := time.UnixMilli(w.ResetsAt).Sub(now)
-		if left > 0 {
-			word := "resets in " + rookAgo(now, now.Add(-left).UnixMilli())
-			r.text(fc.sub, word, side.Min.X, next+r.s(10), dim)
-			next += r.s(30)
-		}
-	}
-	return next + r.s(14)
 }
