@@ -1,0 +1,80 @@
+//go:build !dot && !spot
+
+package display
+
+import (
+	"image"
+	"path/filepath"
+	"slices"
+	"testing"
+	"time"
+
+	"github.com/HuskerMinion/techo5/echod/internal/config"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/rook"
+)
+
+func rookSample(now time.Time) rook.View {
+	ms := func(d time.Duration) int64 { return now.Add(-d).UnixMilli() }
+	asks := "approve Bash"
+	return rook.View{
+		Bridges: 2, Connected: 2,
+		Sessions: []rook.Session{
+			{ID: "a", Name: "mac-mini-flutter-dev", Status: "waiting", WaitingFor: &asks, StatusSince: ms(3 * time.Minute), Machine: "mac-mini"},
+			{ID: "b", Name: "mac-mini-orchestrator", Status: "busy", StatusSince: ms(12 * time.Minute), Machine: "mac-mini"},
+			{ID: "c", Name: "lead-automations-otto", Status: "busy", StatusSince: ms(40 * time.Second), Machine: "otto-imac"},
+			{ID: "d", Name: "mp-frontend-otto", Status: "idle", StatusSince: ms(5 * time.Hour), Machine: "otto-imac"},
+		},
+		Usage: &rook.Usage{
+			FiveHour: &rook.Window{UsedPercent: 63, ResetsAt: now.Add(95 * time.Minute).UnixMilli()},
+			Weekly:   &rook.Window{UsedPercent: 92, ResetsAt: now.Add(50 * time.Hour).UnixMilli()},
+		},
+		Production: &rook.Production{Reachable: true, Status: "ok", Version: "v3.18.2"},
+	}
+}
+
+// The Rook screen draws its sessions on the Show 5 and the Show 8, each row a tap zone, the one waiting
+// first; with SHOW_PREVIEW set the frames are written there.
+func TestRookScreenDraws(t *testing.T) {
+	config.Use(filepath.Join(t.TempDir(), "state.json"))
+	was := customScreens
+	t.Cleanup(func() { customScreens = was })
+	customScreens = slices.DeleteFunc(slices.Clone(customScreens), func(c customScreen) bool { return c.id != "rook" })
+	for i := range customScreens {
+		customScreens[i].offered = nil // as if rook.json listed bridges
+	}
+
+	at := time.Date(2026, 11, 25, 16, 20, 0, 0, time.Local)
+	for _, size := range []struct {
+		name string
+		w, h int
+	}{{"show5", showWide, showHigh}, {"show8", show8Wide, show8High}} {
+		v := rookSample(at)
+		s := scene{now: at, phase: "idle", custom: customView{name: "rook", data: v}}
+		goldenDraw(t, "rook-"+size.name, size.w, size.h, s)
+		customHits.Lock()
+		zones := slices.Clone(customHits.zones)
+		customHits.Unlock()
+		var sessions []string
+		for _, z := range zones {
+			if z.kind == "session" {
+				sessions = append(sessions, z.id)
+			}
+		}
+		if !slices.Equal(sessions, []string{"a", "b", "c", "d"}) {
+			t.Fatalf("%s: session zones %v", size.name, sessions)
+		}
+		if rookKey(s) == "" || customFrameKey(s, false, false) == "" {
+			t.Fatal("the Rook screen has no frame key")
+		}
+
+		empty := scene{now: at, phase: "idle", custom: customView{name: "rook", data: rook.View{Bridges: 2}}}
+		goldenDraw(t, "rook-connecting-"+size.name, size.w, size.h, empty)
+	}
+	if got, _ := rookSummary(rookSample(at)); got != "1 need you · 2 working" {
+		t.Fatalf("summary %q", got)
+	}
+	if rookAgo(at, at.Add(-90*time.Minute).UnixMilli()) != "1h" || rookAgo(at, at.Add(-20*time.Second).UnixMilli()) != "now" {
+		t.Fatal("rookAgo")
+	}
+	_ = image.Point{}
+}
