@@ -52,6 +52,17 @@ func TestApplyAndOrder(t *testing.T) {
 	if v.Usage == nil || v.Usage.FiveHour.UsedPercent != 42 || v.Production == nil || v.Production.Status != "ok" {
 		t.Fatalf("usage/production %+v %+v", v.Usage, v.Production)
 	}
+	twin := &bridge{url: "http://y", connected: true}
+	mu.Lock()
+	bridges = append(bridges, twin)
+	mu.Unlock()
+	apply(twin, "snapshot", []byte(snap))
+	if n := len(Snapshot().Sessions); n != 4 {
+		t.Fatalf("a machine at two addresses gave %d sessions", n)
+	}
+	mu.Lock()
+	bridges = bridges[:1]
+	mu.Unlock()
 	if !apply(b, "sessions", []byte(`{"machine":"mac-mini","sessions":[]}`)) || len(Snapshot().Sessions) != 0 {
 		t.Fatal("sessions event did not replace the list")
 	}

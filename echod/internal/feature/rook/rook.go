@@ -323,11 +323,17 @@ func Snapshot() View {
 	mu.Lock()
 	defer mu.Unlock()
 	v := View{Bridges: len(loadConfig().Bridges)}
+	seen := map[string]bool{} // one machine reached at two addresses reports its sessions twice
 	for _, b := range bridges {
 		if b.connected {
 			v.Connected++
 		}
-		v.Sessions = append(v.Sessions, b.sessions...)
+		for _, s := range b.sessions {
+			if k := s.Machine + "/" + s.ID; !seen[k] {
+				seen[k] = true
+				v.Sessions = append(v.Sessions, s)
+			}
+		}
 		if v.Usage == nil && b.usage != nil && b.usage.FiveHour != nil {
 			v.Usage = b.usage
 		}
