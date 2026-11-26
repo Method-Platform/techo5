@@ -38,8 +38,9 @@ var _ = func() bool {
 		rank:    50,
 		offered: rook.Configured,
 		listen:  rook.Start,
-		fill:    func(_ *Display, v *customView) { v.data = rook.Snapshot() },
+		fill:    rookFill,
 		draw:    drawRook,
+		gesture: rookGesture,
 		key:     rookKey,
 	})
 	return true
@@ -68,8 +69,13 @@ var (
 const rookRows = 4
 
 func rookView(s scene) rook.View {
-	v, _ := s.custom.data.(rook.View)
-	return v
+	switch d := s.custom.data.(type) {
+	case rookData:
+		return d.view
+	case rook.View:
+		return d
+	}
+	return rook.View{}
 }
 
 // rookKey is what a frame shows, for frames that would look the same. The times in it go by the
@@ -77,6 +83,9 @@ func rookView(s scene) rook.View {
 func rookKey(s scene) string {
 	v := rookView(s)
 	var b strings.Builder
+	if rookOnHealth(s) {
+		return rookHealthKey(v)
+	}
 	fmt.Fprintf(&b, "%d/%d|%d|", v.Connected, v.Bridges, s.now.Unix()/60)
 	for _, x := range v.Sessions {
 		fmt.Fprintf(&b, "%s/%s:%s:%s:%d|", x.Machine, x.ID, x.Status, x.Label(), x.StatusSince/60000)
@@ -215,6 +224,7 @@ func (p strip) fy(dp float64) float64 { return p.oy + dp*p.k }
 func (p strip) px(dp float64) float64 { return dp * p.k }
 
 func (p strip) sans(bold bool, dp float64) font.Face { return rkFace("inter", bold, dp*p.k) }
+
 // mono is the design's IBM Plex Mono: Inter stands in, letter-spaced, since Go Mono's slab serifs
 // read heavy at these sizes.
 func (p strip) mono(bold bool, dp float64) font.Face { return rkFace("inter", bold, dp*p.k*1.06) }
@@ -337,6 +347,9 @@ func (p strip) wrap(face font.Face, s string, room float64) []string {
 
 func drawRook(r *renderer, s scene) []customZone {
 	v := rookView(s)
+	if rookOnHealth(s) {
+		return drawRookHealth(r, s, v)
+	}
 	k := math.Min(float64(r.w)/788, float64(r.h)/394)
 	p := strip{r: r, k: k, ox: (float64(r.w) - 788*k) / 2, oy: (float64(r.h) - 394*k) / 2}
 	r.fillRect(image.Rect(0, 0, r.w, r.h), rkGround)
@@ -517,6 +530,7 @@ func drawRook(r *renderer, s scene) []customZone {
 		p.line(p.mono(true, size), f.value, x, y+18, 112, -1, f.c)
 	}
 
+	p.rookPageDots(false)
 	if more := len(rest) - len(shown); more > 0 {
 		p.spaced(p.mono(false, 8.5), fmt.Sprintf("+%d MORE", more), 772, 380, 1.3, 1, rkInk3)
 	}

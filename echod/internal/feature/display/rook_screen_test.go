@@ -3,14 +3,17 @@
 package display
 
 import (
+	"encoding/json"
 	"image"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/rook"
+	"github.com/HuskerMinion/techo5/echod/internal/hardware/touch"
 )
 
 func rookSample(now time.Time) rook.View {
@@ -85,6 +88,43 @@ func TestRookScreenDraws(t *testing.T) {
 		down.Production = &rook.Production{Reachable: true, Status: "degraded", Alerts: []string{"redis down"}}
 		goldenDraw(t, "rook-incident-"+size.name, size.w, size.h, scene{now: at, phase: "idle", custom: customView{name: "rook", data: down}})
 	}
+	// The Health page, a swipe away, with production's detail as a bridge sends it.
+	var detail rook.Detail
+	if err := json.Unmarshal([]byte(rookDetailSample), &detail); err != nil {
+		t.Fatal(err)
+	}
+	for _, size := range []struct {
+		name string
+		w, h int
+	}{{"show5", showWide, showHigh}, {"show8", show8Wide, show8High}} {
+		v := rookSample(at)
+		v.Production = &rook.Production{Reachable: true, Status: "OK", Alerts: []string{"Task scheduler degraded"}, Detail: &detail}
+		s := scene{now: at, phase: "idle", custom: customView{name: "rook", data: rookData{view: v, health: true}}}
+		if !rookOnHealth(s) || !strings.HasPrefix(rookKey(s), "health|") {
+			t.Fatal("not the Health page")
+		}
+		goldenDraw(t, "rook-health-"+size.name, size.w, size.h, s)
+		v.Production = &rook.Production{Reachable: true, Status: "OK"}
+		goldenDraw(t, "rook-health-none-"+size.name, size.w, size.h, scene{now: at, phase: "idle", custom: customView{name: "rook", data: rookData{view: v, health: true}}})
+		down := rookSample(at)
+		down.Production = &rook.Production{Reachable: false, Status: "down", Detail: &detail}
+		if rookOnHealth(scene{custom: customView{name: "rook", data: rookData{view: down, health: true}}}) {
+			t.Fatal("production down left the Health page up")
+		}
+	}
+	rookPager.health = false
+	rookGesture(nil, touch.Gesture{Kind: touch.SwipeLeft}, image.Point{})
+	if !rookPager.health {
+		t.Fatal("a swipe did not turn to Health")
+	}
+	rookGesture(nil, touch.Gesture{Kind: touch.SwipeRight}, image.Point{})
+	if rookPager.health {
+		t.Fatal("a swipe did not turn back")
+	}
+	if got := rookReason("Sync failures: outbound leads 5 DUPLICATE, leadNotes 4 X, textMessages 3 none · inbound leads 15 none · 0 stuck"); got != "Sync failures · outbound 12 · inbound 15 · 0 stuck" {
+		t.Fatalf("reason %q", got)
+	}
+
 	if got, _ := rookSummary(rookSample(at)); got != "1 need you · 2 working" {
 		t.Fatalf("summary %q", got)
 	}

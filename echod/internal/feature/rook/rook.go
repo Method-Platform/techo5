@@ -86,6 +86,71 @@ type Production struct {
 	Status    string   `json:"status"`
 	Alerts    []string `json:"alerts"`
 	Version   string   `json:"version"`
+	Detail    *Detail  `json:"detail"` // nil until the bridge has a health snapshot
+}
+
+// Detail is production's health snapshot: what the Health page draws.
+type Detail struct {
+	Env  string `json:"env"`
+	KPIs []KPI  `json:"kpis"`
+	// Components are every part of production, grouped application, data, workers, edge.
+	Components []Component `json:"components"`
+	Queues     struct {
+		Total          int `json:"total"`
+		Unhealthy      int `json:"unhealthy"`
+		Waiting        int `json:"waiting"`
+		Delayed        int `json:"delayed"`
+		FailedLastHour int `json:"failedLastHour"`
+	} `json:"queues"`
+	Mongo *struct {
+		Members   int  `json:"members"`
+		PrimaryOK bool `json:"primaryOk"`
+		MaxLagSec *int `json:"maxLagSec"`
+	} `json:"mongo"`
+	Redis *struct {
+		UsedMB    int `json:"usedMb"`
+		MaxMB     int `json:"maxMb"`
+		Evicted   int `json:"evictedLastHour"`
+		OpsPerSec int `json:"opsPerSec"`
+	} `json:"redis"`
+	Solr *struct {
+		Up        bool  `json:"up"`
+		Cores     int   `json:"cores"`
+		Unhealthy int   `json:"unhealthyCores"`
+		Documents int64 `json:"documents"`
+	} `json:"solr"`
+	Errors struct {
+		Count int `json:"count"`
+	} `json:"errors"`
+	Integrations struct {
+		Total     int `json:"total"`
+		Unhealthy int `json:"unhealthy"`
+	} `json:"integrations"`
+	Releases []struct {
+		App     string `json:"app"`
+		Release string `json:"release"`
+		AgoSec  int64  `json:"deployedAgoSec"`
+	} `json:"releases"`
+}
+
+// KPI is one of production's headline numbers with its last hour, a point a minute; a nil point is a
+// gap in the series, not a zero.
+type KPI struct {
+	ID     string     `json:"id"`
+	Label  string     `json:"label"`
+	Value  string     `json:"value"`
+	Delta  *string    `json:"deltaText"`
+	Tone   *string    `json:"tone"` // good, bad, neutral or nil
+	Unit   *string    `json:"unit"`
+	Points []*float64 `json:"points"`
+}
+
+// Component is one part of production and how it is.
+type Component struct {
+	Name   string  `json:"name"`
+	Group  string  `json:"group"`
+	Status string  `json:"status"` // healthy, degraded, down, unknown
+	Reason *string `json:"reason"`
 }
 
 // View is everything the bridges report, merged: what a frame of the screen shows.
