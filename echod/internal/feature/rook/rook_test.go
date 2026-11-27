@@ -57,11 +57,18 @@ func TestApplyAndOrder(t *testing.T) {
 	bridges = append(bridges, twin)
 	mu.Unlock()
 	apply(twin, "snapshot", []byte(snap))
-	if n := len(Snapshot().Sessions); n != 4 {
-		t.Fatalf("a machine at two addresses gave %d sessions", n)
+	if v := Snapshot(); len(v.Sessions) != 4 || v.Connected != 1 || v.Bridges != len(loadConfig().Bridges)-1 {
+		t.Fatalf("a machine at two addresses gave %d sessions, %d/%d", len(v.Sessions), v.Connected, v.Bridges)
 	}
 	mu.Lock()
 	bridges = bridges[:1]
+	b.connected = false
+	mu.Unlock()
+	if Snapshot().Production != nil {
+		t.Fatal("a bridge that went quiet still reports production")
+	}
+	mu.Lock()
+	b.connected = true
 	mu.Unlock()
 	if !apply(b, "sessions", []byte(`{"machine":"mac-mini","sessions":[]}`)) || len(Snapshot().Sessions) != 0 {
 		t.Fatal("sessions event did not replace the list")

@@ -447,9 +447,15 @@ func Snapshot() View {
 	defer mu.Unlock()
 	v := View{Bridges: len(loadConfig().Bridges)}
 	seen := map[string]bool{} // one machine reached at two addresses reports its sessions twice
+	machines := map[string]bool{}
 	for _, b := range bridges {
 		if b.connected {
-			v.Connected++
+			if b.machine != "" && machines[b.machine] {
+				v.Bridges-- // the same machine again, at another address: count it once
+			} else {
+				v.Connected++
+			}
+			machines[b.machine] = true
 		}
 		for _, s := range b.sessions {
 			if k := s.Machine + "/" + s.ID; !seen[k] {
@@ -460,7 +466,9 @@ func Snapshot() View {
 		if v.Usage == nil && b.usage != nil && b.usage.FiveHour != nil {
 			v.Usage = b.usage
 		}
-		if v.Production == nil && b.production != nil && b.production.Status != "" {
+		// A bridge that has gone quiet says nothing about production now: its last word, down or up,
+		// would stand on the screen as if it were current.
+		if v.Production == nil && b.connected && b.production != nil && b.production.Status != "" {
 			v.Production = b.production
 		}
 		if c := b.codex; c != nil && c.Primary != nil {
