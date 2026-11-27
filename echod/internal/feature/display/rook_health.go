@@ -32,6 +32,7 @@ var rookPager struct {
 	sync.Mutex
 	health bool
 	at     time.Time
+	sheet  string // machine/id of the session whose prompt sheet is up, or ""
 }
 
 // rookData is what a frame of the Rook screen shows: the bridges' view, and which page.
@@ -39,19 +40,28 @@ type rookData struct {
 	view   rook.View
 	health bool
 	focus  rook.FocusResult // the last tap's ask, while it is still worth saying
+	sheet  *rook.Session    // the session whose prompt the sheet shows, when it is up
 }
 
 // rookFocusFor is how long the line saying how a tap went stays up.
 const rookFocusFor = 6 * time.Second
 
 func rookFill(_ *Display, v *customView) {
+	view := rook.Snapshot()
 	rookPager.Lock()
 	if rookPager.health && time.Since(rookPager.at) > rookHealthFor {
 		rookPager.health = false
 	}
+	if rookPager.sheet != "" && time.Since(rookPager.at) > rookSheetFor {
+		rookPager.sheet = ""
+	}
+	sheet := rookSheetSession(view, rookPager.sheet)
+	if sheet == nil {
+		rookPager.sheet = "" // answered, here or at the computer
+	}
 	health := rookPager.health
 	rookPager.Unlock()
-	d := rookData{view: rook.Snapshot(), health: health}
+	d := rookData{view: view, health: health, sheet: sheet}
 	if f := rook.LastFocus(); !f.At.IsZero() && time.Since(f.At) < rookFocusFor {
 		d.focus = f
 	}
@@ -61,24 +71,62 @@ func rookFill(_ *Display, v *customView) {
 // rookGesture is a finger on the Rook screen: sideways turns the page; any touch on Health keeps it.
 func rookGesture(_ *Display, g touch.Gesture, at image.Point) {
 	rookPager.Lock()
-	switch g.Kind {
-	case touch.SwipeLeft, touch.SwipeRight:
-		rookPager.health = !rookPager.health
+	sheet := rookPager.sheet
+	if sheet == "" {
+		switch g.Kind {
+		case touch.SwipeLeft, touch.SwipeRight:
+			rookPager.health = !rookPager.health
+		}
 	}
 	rookPager.at = time.Now()
 	rookPager.Unlock()
 	if g.Kind != touch.Tap {
 		return
 	}
-	// A tap on a session: bring its terminal forward on its machine.
 	z, ok := customZoneAt(at)
-	if !ok || z.kind != "session" {
+	if !ok {
 		return
 	}
-	for _, s := range rook.Snapshot().Sessions {
-		if s.Machine+"/"+s.ID == z.id {
-			rook.Focus(s)
+	find := func(key string) (rook.Session, bool) {
+		for _, s := range rook.Snapshot().Sessions {
+			if s.Machine+"/"+s.ID == key {
+				return s, true
+			}
+		}
+		return rook.Session{}, false
+	}
+	switch z.kind {
+	case "session":
+		// A session with a prompt opens the sheet; any other is brought forward on its machine.
+		s, ok := find(z.id)
+		if !ok {
 			return
+		}
+		if s.Prompt != nil {
+			rookPager.Lock()
+			rookPager.sheet = z.id
+			rookPager.Unlock()
+			return
+		}
+		rook.Focus(s)
+	case "sheet-close":
+		rookPager.Lock()
+		rookPager.sheet = ""
+		rookPager.Unlock()
+	case "sheet-open":
+		if s, ok := find(sheet); ok {
+			rook.Focus(s)
+		}
+	case "answer":
+		s, ok := find(sheet)
+		if !ok || s.Prompt == nil {
+			return
+		}
+		switch {
+		case z.id == "allow", z.id == "deny":
+			rook.Answer(s, z.id, "")
+		case strings.HasPrefix(z.id, "opt:"):
+			rook.Answer(s, "answer", strings.TrimPrefix(z.id, "opt:"))
 		}
 	}
 }
@@ -88,6 +136,15 @@ func rookFocusLine(f rook.FocusResult) (string, color.RGBA) {
 	switch {
 	case f.At.IsZero():
 		return "", rkInk3
+	case f.Verb == "allow" || f.Verb == "deny" || f.Verb == "answer":
+		what := map[string]string{"allow": "Allowed", "deny": "Denied", "answer": "Answered “" + f.Option + "”"}[f.Verb]
+		switch {
+		case !f.Done:
+			return "Sending to " + f.Machine + "…", rkInk2
+		case f.OK:
+			return what + " · " + f.Label, rkGreen
+		}
+		return "Not answered: " + f.Reason, rkAmber
 	case !f.Done:
 		return "Opening " + f.Label + " on " + f.Machine + "…", rkInk2
 	case f.OK:

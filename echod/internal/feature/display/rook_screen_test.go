@@ -131,6 +131,35 @@ func TestRookScreenDraws(t *testing.T) {
 	tapped := rookData{view: rookSample(at), focus: rook.FocusResult{Label: "mac-mini-flutter-dev", Machine: "mac-mini", At: at, Done: true, OK: true}}
 	goldenDraw(t, "rook-focus-show5", showWide, showHigh, scene{now: at, phase: "idle", custom: customView{name: "rook", data: tapped}})
 
+	// The prompt sheet: a permission, a question, and one that has to be answered at the computer.
+	note := "Fetch HTTP headers from example.com"
+	for _, c := range []struct {
+		name string
+		pr   rook.Prompt
+	}{
+		{"permission", rook.Prompt{ID: "p1", Kind: "permission", Tool: "Bash", Title: "Bash", Answerable: true, Note: &note,
+			Detail: "curl -sI https://example.com && rm -rf build/ && go test ./... -run TestRookScreenDraws -count=1 2>&1 | tail -40 && echo done with a long enough line to wrap twice over the card"}},
+		{"question", rook.Prompt{ID: "p2", Kind: "question", Tool: "AskUserQuestion", Title: "Branch", Answerable: true,
+			Detail: "Which branch should the release go out from?", Options: []string{"v3-final", "main", "development"}}},
+		{"elsewhere", rook.Prompt{ID: "p3", Kind: "question", Tool: "AskUserQuestion", Title: "Setup", Answerable: false,
+			Detail: "Pick the features to enable"}},
+	} {
+		v := rookSample(at)
+		pr := c.pr
+		v.Sessions[1].Prompt = &pr
+		sheet := rookSheetSession(v, v.Sessions[1].Machine+"/"+v.Sessions[1].ID)
+		if sheet == nil || sheet.Prompt.ID != pr.ID {
+			t.Fatal("the sheet did not find its session")
+		}
+		goldenDraw(t, "rook-sheet-"+c.name+"-show5", showWide, showHigh, scene{now: at, phase: "idle", custom: customView{name: "rook", data: rookData{view: v, sheet: sheet}}})
+		if c.name == "permission" {
+			goldenDraw(t, "rook-sheet-prompted-show5", showWide, showHigh, scene{now: at, phase: "idle", custom: customView{name: "rook", data: rookData{view: v}}})
+		}
+	}
+	if rookSheetSession(rookSample(at), "mac-mini/b") != nil {
+		t.Fatal("a session with no prompt opened the sheet")
+	}
+
 	if got := rookReason("Sync failures: outbound leads 5 DUPLICATE, leadNotes 4 X, textMessages 3 none · inbound leads 15 none · 0 stuck"); got != "Sync failures · outbound 12 · inbound 15 · 0 stuck" {
 		t.Fatalf("reason %q", got)
 	}

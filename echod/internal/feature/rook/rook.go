@@ -39,7 +39,22 @@ type Session struct {
 	Kind        string  `json:"kind"`
 	StatusSince int64   `json:"statusSince"` // ms since the epoch
 	StartedAt   int64   `json:"startedAt"`
+	Prompt      *Prompt `json:"prompt"` // a permission prompt its bridge holds, which the screen can answer
 	Machine     string  `json:"-"`
+}
+
+// Prompt is a permission prompt a bridge holds open for a session (its prompts.mjs): what the tool
+// would do, and the choices. Answering it is Answer.
+type Prompt struct {
+	ID         string   `json:"id"`
+	Kind       string   `json:"kind"` // permission, question or plan
+	Tool       string   `json:"tool"`
+	Title      string   `json:"title"`
+	Detail     string   `json:"detail"`
+	Note       *string  `json:"note"`
+	Options    []string `json:"options"` // a question's choices; empty for allow or deny
+	Answerable bool     `json:"answerable"`
+	Why        *string  `json:"why"`
 }
 
 // Label is what a session is called on the screen: its own title, else its name, else its project.
@@ -183,6 +198,9 @@ func (v View) count(status string) int {
 
 type config struct {
 	Bridges []string `json:"bridges"`
+	// Tokens are what a bridge asks of an answer to one of its prompts, by its machine name (the
+	// bridge's ~/.config/rook-bridge/answer-token). A machine without one is answered at the computer.
+	Tokens map[string]string `json:"tokens"`
 }
 
 func configPath() string {
@@ -511,6 +529,8 @@ func sortSessions(ss []Session) {
 
 // FocusResult is the last tap's ask, for the screen to say how it went.
 type FocusResult struct {
+	Verb    string // focus, allow, deny or answer
+	Option  string // the choice, for answer
 	Label   string // the session's, as the screen names it
 	Machine string
 	Done    bool // the bridge has answered (or could not be reached)
@@ -544,7 +564,7 @@ func Focus(s Session) {
 	}
 	mu.Unlock()
 	focusMu.Lock()
-	lastFocus = FocusResult{Label: s.Label(), Machine: s.Machine, At: time.Now()}
+	lastFocus = FocusResult{Verb: "focus", Label: s.Label(), Machine: s.Machine, At: time.Now()}
 	at := lastFocus.At
 	focusMu.Unlock()
 	changedNow()
@@ -569,6 +589,80 @@ var focusClient = &http.Client{Timeout: 8 * time.Second}
 func postFocus(url, id string) (bool, string) {
 	body, _ := json.Marshal(map[string]string{"id": id})
 	resp, err := focusClient.Post(url+"/focus", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		return false, "the bridge did not answer"
+	}
+	defer resp.Body.Close()
+	var r struct {
+		OK     bool   `json:"ok"`
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&r)
+	if resp.StatusCode == http.StatusOK && r.OK {
+		return true, ""
+	}
+	if r.Reason == "" {
+		r.Reason = resp.Status
+	}
+	return false, r.Reason
+}
+
+// Answer answers the session's prompt on its bridge, in the background: verb allow or deny, or
+// answer with option one of the prompt's Options. LastFocus says how it went.
+func Answer(s Session, verb, option string) {
+	if s.Prompt == nil {
+		return
+	}
+	mu.Lock()
+	url := ""
+	for _, b := range bridges {
+		if b.connected && b.machine == s.Machine {
+			url = b.url
+			break
+		}
+	}
+	mu.Unlock()
+	token := loadConfig().Tokens[s.Machine]
+	focusMu.Lock()
+	lastFocus = FocusResult{Verb: verb, Option: option, Label: s.Label(), Machine: s.Machine, At: time.Now()}
+	at := lastFocus.At
+	focusMu.Unlock()
+	changedNow()
+
+	go func() {
+		ok, reason := false, "its machine is not connected"
+		switch {
+		case token == "":
+			reason = "no answer token for " + s.Machine
+		case url != "":
+			behavior := "allow"
+			if verb == "deny" {
+				behavior = "deny"
+			}
+			ok, reason = postAnswer(url, token, s.Prompt.ID, behavior, option)
+		}
+		slog.Info("rook: answer", "session", s.ID, "machine", s.Machine, "verb", verb, "ok", ok, "reason", reason)
+		focusMu.Lock()
+		if lastFocus.At.Equal(at) {
+			lastFocus.Done, lastFocus.OK, lastFocus.Reason = true, ok, reason
+		}
+		focusMu.Unlock()
+		changedNow()
+	}()
+}
+
+// CanAnswer is whether the screen holds the token the session's bridge asks of an answer.
+func CanAnswer(s Session) bool { return loadConfig().Tokens[s.Machine] != "" }
+
+func postAnswer(url, token, id, behavior, option string) (bool, string) {
+	body, _ := json.Marshal(map[string]string{"id": id, "behavior": behavior, "option": option})
+	req, err := http.NewRequest(http.MethodPost, url+"/prompt/answer", strings.NewReader(string(body)))
+	if err != nil {
+		return false, err.Error()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Rook-Token", token)
+	resp, err := focusClient.Do(req)
 	if err != nil {
 		return false, "the bridge did not answer"
 	}

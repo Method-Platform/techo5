@@ -83,6 +83,10 @@ func rookView(s scene) rook.View {
 func rookKey(s scene) string {
 	v := rookView(s)
 	var b strings.Builder
+	if d, ok := s.custom.data.(rookData); ok && d.sheet != nil {
+		line, _ := rookFocusLine(d.focus)
+		return rookSheetKey(d.sheet, line)
+	}
 	if rookOnHealth(s) {
 		return rookHealthKey(v)
 	}
@@ -93,6 +97,9 @@ func rookKey(s scene) string {
 	fmt.Fprintf(&b, "%d/%d|%d|", v.Connected, v.Bridges, s.now.Unix()/60)
 	for _, x := range v.Sessions {
 		fmt.Fprintf(&b, "%s/%s:%s:%s:%d|", x.Machine, x.ID, x.Status, x.Label(), x.StatusSince/60000)
+		if x.Prompt != nil {
+			fmt.Fprintf(&b, "prompt:%s:%s|", x.Prompt.ID, x.Prompt.Title)
+		}
 	}
 	if u := v.Usage; u != nil {
 		if u.FiveHour != nil {
@@ -351,6 +358,10 @@ func (p strip) wrap(face font.Face, s string, room float64) []string {
 
 func drawRook(r *renderer, s scene) []customZone {
 	v := rookView(s)
+	if d, ok := s.custom.data.(rookData); ok && d.sheet != nil {
+		line, c := rookFocusLine(d.focus)
+		return drawRookSheet(r, s, d.sheet, line, c)
+	}
 	if rookOnHealth(s) {
 		return drawRookHealth(r, s, v)
 	}
@@ -414,7 +425,10 @@ func drawRook(r *renderer, s scene) []customZone {
 			meta += " · " + c
 		}
 		y := 240.0
-		if lead.Status == "waiting" && lead.WaitingFor != nil && *lead.WaitingFor != "" {
+		if lead.Prompt != nil {
+			p.line(p.sans(false, 12.5), lead.Prompt.Title+" · tap to answer", cx, y, 220, 0, rkAmber)
+			y += 20
+		} else if lead.Status == "waiting" && lead.WaitingFor != nil && *lead.WaitingFor != "" {
 			p.line(p.sans(false, 12.5), *lead.WaitingFor, cx, y, 220, 0, rkAmber)
 			y += 20
 		}
@@ -450,7 +464,9 @@ func drawRook(r *renderer, s scene) []customZone {
 		p.dot(p.fx(432), p.fy(top+25), p.px(3.6), tone)
 		p.line(p.sans(true, 13), x.Label(), 446, top+22, 236, -1, rkInk)
 		sub := x.Machine
-		if x.Status == "waiting" && x.WaitingFor != nil && *x.WaitingFor != "" {
+		if x.Prompt != nil {
+			sub = x.Prompt.Title + " · tap to answer · " + x.Machine
+		} else if x.Status == "waiting" && x.WaitingFor != nil && *x.WaitingFor != "" {
 			sub = *x.WaitingFor + " · " + x.Machine
 		}
 		small := p.mono(false, 9)
