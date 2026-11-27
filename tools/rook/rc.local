@@ -1,6 +1,70 @@
 #!/bin/sh
 # Method-Platform fork: run the Rook build of echod (/data/rook/echod) in place of the release one.
 # Remove this file (or /data/rook/echod) and reboot to go back to the stock daemon.
-[ -x /data/rook/echod ] || exit 0
-mount --bind /data/rook/echod /usr/local/bin/techo5 && killall techo5
-echo "rook echod bound $(date)"
+#
+# A new build goes in as a trial: copy it to /data/rook/echod.new and run this file (tools/rook/deploy.sh
+# does both). The build it replaces is kept as echod.prev, and for TRIAL seconds the daemon is watched:
+# one that keeps restarting (init respawns it on every exit) is taken out and echod.prev put back, so a
+# build that crashes at start cannot leave the screen dead until someone gets a shell on it. One that
+# stays up settles the trial. A restart of the box during a trial watches it again from the start.
+R=/data/rook
+BIN=/usr/local/bin/techo5
+TRIAL=240   # seconds watched
+STEADY=90   # the daemon's pid unchanged this long at the end of the trial settles it
+LIMIT=4     # this many daemon starts within the trial puts the previous build back
+ABSENT=100  # and so does no daemon running for this long at a stretch (one that dies at once never
+            # shows a pid; the wait for the network before it starts is at most 90s)
+
+log() { echo "rook: $* ($(date))"; }
+
+if [ -f $R/echod.new ]; then
+	chmod +x $R/echod.new
+	[ -x $R/echod ] && mv -f $R/echod $R/echod.prev
+	mv -f $R/echod.new $R/echod
+	: > $R/trial
+	log "trial of a new build begins"
+fi
+[ -x $R/echod ] || exit 0
+
+bind() {
+	umount -l $BIN 2>/dev/null
+	mount --bind $R/echod $BIN && killall techo5 2>/dev/null
+	log "rook echod bound"
+}
+bind
+
+[ -e $R/trial ] || exit 0
+
+# The watch: count the daemon's distinct pids over the trial.
+(
+	seen="" starts=0 last="" since=0 t=0 gone=0
+	while [ $t -lt $TRIAL ]; do
+		sleep 5; t=$((t + 5))
+		pid=$(pidof techo5 | cut -d' ' -f1)
+		if [ -z "$pid" ]; then gone=$((gone + 5)); else gone=0; fi
+		if [ -n "$pid" ] && [ "$pid" != "$last" ]; then
+			case " $seen " in *" $pid "*) ;; *) seen="$seen $pid"; starts=$((starts + 1)) ;; esac
+			last=$pid since=$t
+		fi
+		if [ $starts -ge $LIMIT ] || [ $gone -ge $ABSENT ]; then
+			if [ -x $R/echod.prev ]; then
+				mv -f $R/echod $R/echod.bad && mv -f $R/echod.prev $R/echod
+				rm -f $R/trial
+				log "trial failed: the daemon started $starts times in ${t}s, not running for the last ${gone}s; previous build put back, the new one kept as echod.bad"
+				bind
+			else
+				rm -f $R/trial
+				log "trial failed: the daemon started $starts times in ${t}s, not running for the last ${gone}s, and there is no previous build to put back"
+			fi
+			exit 0
+		fi
+	done
+	if [ -n "$last" ] && [ $((t - since)) -ge $STEADY ]; then
+		rm -f $R/trial $R/echod.bad
+		log "trial settled: the daemon has stayed up $((t - since))s"
+	else
+		# Not steady, but not failing either: the trial stays open, and the next run of this file watches
+		# it again.
+		log "trial not settled after ${t}s ($starts starts); left open"
+	fi
+) >> $R/trial.log 2>&1 < /dev/null &

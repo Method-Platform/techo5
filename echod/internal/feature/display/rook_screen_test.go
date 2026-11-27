@@ -67,7 +67,7 @@ func TestRookScreenDraws(t *testing.T) {
 		var sessions []string
 		for _, z := range zones {
 			if z.kind == "session" {
-				sessions = append(sessions, z.id)
+				sessions = append(sessions, z.id[strings.Index(z.id, "/")+1:])
 			}
 		}
 		if !slices.Equal(sessions, []string{"a", "b", "c", "d", "e"}) {
@@ -121,6 +121,16 @@ func TestRookScreenDraws(t *testing.T) {
 	if rookPager.health {
 		t.Fatal("a swipe did not turn back")
 	}
+	// A tap's line: asked, then how it went.
+	if l, _ := rookFocusLine(rook.FocusResult{Label: "a", Machine: "m", At: at}); l != "Opening a on m…" {
+		t.Fatalf("focus line %q", l)
+	}
+	if l, c := rookFocusLine(rook.FocusResult{Machine: "m", At: at, Done: true, Reason: "no terminal"}); l != "Couldn't open it: no terminal" || c != rkAmber {
+		t.Fatalf("focus line %q", l)
+	}
+	tapped := rookData{view: rookSample(at), focus: rook.FocusResult{Label: "mac-mini-flutter-dev", Machine: "mac-mini", At: at, Done: true, OK: true}}
+	goldenDraw(t, "rook-focus-show5", showWide, showHigh, scene{now: at, phase: "idle", custom: customView{name: "rook", data: tapped}})
+
 	if got := rookReason("Sync failures: outbound leads 5 DUPLICATE, leadNotes 4 X, textMessages 3 none · inbound leads 15 none · 0 stuck"); got != "Sync failures · outbound 12 · inbound 15 · 0 stuck" {
 		t.Fatalf("reason %q", got)
 	}

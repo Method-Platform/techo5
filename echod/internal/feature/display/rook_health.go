@@ -38,7 +38,11 @@ var rookPager struct {
 type rookData struct {
 	view   rook.View
 	health bool
+	focus  rook.FocusResult // the last tap's ask, while it is still worth saying
 }
+
+// rookFocusFor is how long the line saying how a tap went stays up.
+const rookFocusFor = 6 * time.Second
 
 func rookFill(_ *Display, v *customView) {
 	rookPager.Lock()
@@ -47,18 +51,49 @@ func rookFill(_ *Display, v *customView) {
 	}
 	health := rookPager.health
 	rookPager.Unlock()
-	v.data = rookData{view: rook.Snapshot(), health: health}
+	d := rookData{view: rook.Snapshot(), health: health}
+	if f := rook.LastFocus(); !f.At.IsZero() && time.Since(f.At) < rookFocusFor {
+		d.focus = f
+	}
+	v.data = d
 }
 
 // rookGesture is a finger on the Rook screen: sideways turns the page; any touch on Health keeps it.
-func rookGesture(_ *Display, g touch.Gesture, _ image.Point) {
+func rookGesture(_ *Display, g touch.Gesture, at image.Point) {
 	rookPager.Lock()
-	defer rookPager.Unlock()
 	switch g.Kind {
 	case touch.SwipeLeft, touch.SwipeRight:
 		rookPager.health = !rookPager.health
 	}
 	rookPager.at = time.Now()
+	rookPager.Unlock()
+	if g.Kind != touch.Tap {
+		return
+	}
+	// A tap on a session: bring its terminal forward on its machine.
+	z, ok := customZoneAt(at)
+	if !ok || z.kind != "session" {
+		return
+	}
+	for _, s := range rook.Snapshot().Sessions {
+		if s.Machine+"/"+s.ID == z.id {
+			rook.Focus(s)
+			return
+		}
+	}
+}
+
+// rookFocusLine is what the screen says about the last tap, and in what color.
+func rookFocusLine(f rook.FocusResult) (string, color.RGBA) {
+	switch {
+	case f.At.IsZero():
+		return "", rkInk3
+	case !f.Done:
+		return "Opening " + f.Label + " on " + f.Machine + "…", rkInk2
+	case f.OK:
+		return "Brought forward on " + f.Machine, rkGreen
+	}
+	return "Couldn't open it: " + f.Reason, rkAmber
 }
 
 // rookOnHealth is whether this frame is the Health page: asked for, and production not down.

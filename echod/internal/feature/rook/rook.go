@@ -15,6 +15,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -506,4 +507,82 @@ func sortSessions(ss []Session) {
 		}
 		return strings.Compare(a.Name, b.Name)
 	})
+}
+
+// FocusResult is the last tap's ask, for the screen to say how it went.
+type FocusResult struct {
+	Label   string // the session's, as the screen names it
+	Machine string
+	Done    bool // the bridge has answered (or could not be reached)
+	OK      bool
+	Reason  string    // why not, in the bridge's words
+	At      time.Time // when the tap was
+}
+
+var (
+	focusMu   sync.Mutex
+	lastFocus FocusResult
+)
+
+// LastFocus is the last tap's ask and how it went.
+func LastFocus() FocusResult {
+	focusMu.Lock()
+	defer focusMu.Unlock()
+	return lastFocus
+}
+
+// Focus asks the bridge of the session's machine to bring its terminal forward (the bridge's
+// POST /focus), in the background; LastFocus says how it went, and changed is called when it has.
+func Focus(s Session) {
+	mu.Lock()
+	url := ""
+	for _, b := range bridges {
+		if b.connected && b.machine == s.Machine {
+			url = b.url
+			break
+		}
+	}
+	mu.Unlock()
+	focusMu.Lock()
+	lastFocus = FocusResult{Label: s.Label(), Machine: s.Machine, At: time.Now()}
+	at := lastFocus.At
+	focusMu.Unlock()
+	changedNow()
+
+	go func() {
+		ok, reason := false, "its machine is not connected"
+		if url != "" {
+			ok, reason = postFocus(url, s.ID)
+		}
+		slog.Info("rook: focus", "session", s.ID, "machine", s.Machine, "ok", ok, "reason", reason)
+		focusMu.Lock()
+		if lastFocus.At.Equal(at) {
+			lastFocus.Done, lastFocus.OK, lastFocus.Reason = true, ok, reason
+		}
+		focusMu.Unlock()
+		changedNow()
+	}()
+}
+
+var focusClient = &http.Client{Timeout: 8 * time.Second}
+
+func postFocus(url, id string) (bool, string) {
+	body, _ := json.Marshal(map[string]string{"id": id})
+	resp, err := focusClient.Post(url+"/focus", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		return false, "the bridge did not answer"
+	}
+	defer resp.Body.Close()
+	var r struct {
+		OK     bool   `json:"ok"`
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&r)
+	if resp.StatusCode == http.StatusOK && r.OK {
+		return true, ""
+	}
+	if r.Reason == "" {
+		r.Reason = resp.Status
+	}
+	return false, r.Reason
 }

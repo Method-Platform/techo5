@@ -86,6 +86,10 @@ func rookKey(s scene) string {
 	if rookOnHealth(s) {
 		return rookHealthKey(v)
 	}
+	if d, ok := s.custom.data.(rookData); ok {
+		line, _ := rookFocusLine(d.focus)
+		fmt.Fprintf(&b, "focus:%s|", line)
+	}
 	fmt.Fprintf(&b, "%d/%d|%d|", v.Connected, v.Bridges, s.now.Unix()/60)
 	for _, x := range v.Sessions {
 		fmt.Fprintf(&b, "%s/%s:%s:%s:%d|", x.Machine, x.ID, x.Status, x.Label(), x.StatusSince/60000)
@@ -415,7 +419,7 @@ func drawRook(r *renderer, s scene) []customZone {
 			y += 20
 		}
 		p.spaced(p.mono(false, 10.5), meta, cx, y, 0.9, 0, rkInk3)
-		zones = append(zones, customZone{r: image.Rect(p.x(cx-rad), p.y(cy-rad), p.x(cx+rad), p.y(cy+rad)), kind: "session", id: lead.ID})
+		zones = append(zones, customZone{r: image.Rect(p.x(cx-rad), p.y(cy-rad), p.x(cx+rad), p.y(cy+rad)), kind: "session", id: lead.Machine + "/" + lead.ID})
 	default:
 		p.arc(cx, cy, rad, 7, 0, 360, rkRule)
 		word, sub := "NO SESSIONS", "nothing running"
@@ -457,7 +461,7 @@ func drawRook(r *renderer, s scene) []customZone {
 			age = rookClock(s.now, x.StatusSince)
 		}
 		p.line(p.mono(false, 11), age, 758, top+38, 80, 1, rkInk2)
-		zones = append(zones, customZone{r: box, kind: "session", id: x.ID})
+		zones = append(zones, customZone{r: box, kind: "session", id: x.Machine + "/" + x.ID})
 	}
 
 	// The ledger: six facts, three across.
@@ -531,6 +535,11 @@ func drawRook(r *renderer, s scene) []customZone {
 	}
 
 	p.rookPageDots(false)
+	if d, ok := s.custom.data.(rookData); ok {
+		if line, c := rookFocusLine(d.focus); line != "" {
+			p.line(p.sans(false, 9.5), line, 416, 381, 290, -1, c)
+		}
+	}
 	if more := len(rest) - len(shown); more > 0 {
 		p.spaced(p.mono(false, 8.5), fmt.Sprintf("+%d MORE", more), 772, 380, 1.3, 1, rkInk3)
 	}
